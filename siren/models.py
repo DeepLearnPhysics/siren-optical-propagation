@@ -1,10 +1,21 @@
 import torch
+import h5py
 import numpy as np
 import torchmetrics
 from pytorch_lightning.core.lightning import LightningModule
 
 from siren.networks import Siren as SirenNet
 from photonlib import PhotonLib, Meta
+
+def gradient(y, x, grad_outputs=None, **kwargs):
+    if grad_outputs is None:
+        grad_outputs = torch.ones_like(y)
+
+    grad = torch.autograd.grad(
+        y, [x], grad_outputs=grad_outputs, create_graph=True, **kwargs
+    )
+
+    return grad[0]
 
 class MaxMetric(torchmetrics.Metric):
     def __init__(self):
@@ -22,84 +33,353 @@ class MaxMetric(torchmetrics.Metric):
     def compute(self):
         return self.value.item()
 
+class WeightLUT:
+    def __init__(self, lut, min, max):
+        self._min = min
+        self._max = max
+        self._lut = lut
+    
+    def __getitem__(self, x):
+        with torch.no_grad():
+            x = torch.as_tensor(x)
+            lut = torch.as_tensor(self._lut).type_as(x)
+            
+            length = self._max - self._min
+            nbins = len(lut)
+            
+            idx = torch.floor((x - self._min) / length * nbins).long()
+            idx[idx<0] = 0
+            idx[idx>=nbins] = nbins-1
+        
+        return lut[idx]
+    
+    @classmethod
+    def load(cls, filepath, key):
+        with h5py.File(filepath, 'r') as f:
+            grp = f[key]
+            min = np.array(grp['min']).item()
+            max = np.array(grp['max']).item()
+            lut = np.array(grp['lut'])
+        return cls(lut, min, max)
+
+def get_weights(target):
+    p1 = 6.72
+    p2 = 2.33
+
+    with torch.no_grad():
+        weights = torch.exp(p1 * target + p2 * target**2)
+        weights *= np.exp(p1 - p2)
+        weights[target == -1] *= 0.1
+
+    return weights
+
+def get_grad_weights(target):
+    gamma = 2.785
+    x0 = 2.5
+
+    with torch.no_grad():
+        mask = target.abs() < x0
+        weights = torch.empty_like(target)
+        weights[mask] = torch.exp(gamma * target[mask].abs())
+        weights[~mask] = np.exp(gamma * x0)
+
+    return weights
+
+class Sobel3D(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        
+        g = torch.tensor([1,2,1]).float()  # gaussian filter
+        d = torch.tensor([-1,0,1]).float() # finite diff.
+        
+        # set weight for gradient filters
+        gx = d[:,None,None] * g[None,:,None] * g[None,None,:]
+        gy = g[:,None,None] * d[None,:,None] * g[None,None,:]
+        gz = d[None,None,:] * g[None,:,None] * g[:,None,None]
+
+        pars = torch.cat([gx.unsqueeze(0), gy.unsqueeze(0), gz.unsqueeze(0)])
+        pars = pars.unsqueeze(1)
+        
+        self.sobel = torch.nn.Conv3d(
+            in_channels=1, out_channels=3, kernel_size=3, stride=1, bias=False, 
+             padding_mode='replicate', padding=1,
+        )
+        
+        self.sobel.weight = torch.nn.Parameter(pars, requires_grad=False)
+    
+    def forward(self, img):
+        return self.sobel(img)
+
+def get_sobel_coeffs():
+    g = torch.tensor([1,2,1]).float()
+    d = torch.tensor([-1,0,1]).float()
+
+    coeffs = torch.stack(
+        (d[:,None,None] * g[None,:,None] * g[None,None,:],
+         g[:,None,None] * d[None,:,None] * g[None,None,:],
+         g[:,None,None] * g[None,:,None] * d[None,None,:])
+    ).reshape(3,-1)
+
+    return coeffs
+
 class Siren(LightningModule):
     def __init__(self, cfg, name='siren', plib='photonlib'):
         super().__init__()
 
-        pars = cfg[name]
-        self.net = SirenNet(**pars)
+        model_cfg = cfg[name]
+        self._lambda0 = model_cfg.get('lambda0', 1.)
+        self._lambda1 = model_cfg.get('lambda1', 0.)
+
+        net_pars = model_cfg['network']
+        self.net = SirenNet(**net_pars)
+
+        self._lut = {
+            key: WeightLUT.load(model_cfg['lut'], key)
+            for key in ['vis']
+        }
+        #self._lut = PhotonLib.load(model_cfg['lut'], lib=torch)
 
         plib_fpath = cfg[plib]['filepath']
-        self.meta = Meta.load_file(plib_fpath, lib=torch)
+        self.meta = Meta.load(plib_fpath, lib=torch)
 
-        self._max_vis = MaxMetric()
-
-        self._weights = torch.load(
-            '/sdf/group/neutrino/kvtsang/ml/opreco/plib_data/event_weights.pk')
-    
     def forward(self, x):
         return self.net(x)
     
-    def weighted_mse_loss(self, input, target, weights):
-        loss = (weights * (input - target)**2).mean()
+    def weighted_mse_loss(self, input, target, weight=1.):
+        loss = (weight * (input - target)**2).mean()
         return loss
 
-    def get_weights(self, target):
-        #gamma = 2.247
-        #min_weight = 1e-7
-        #threshold = np.exp(np.log(min_weight) / gamma)
+    def training_step_pair(self, batch, batch_id):
+        x = batch['coord']
+        target = batch['vis']
+        weights = self._lut['vis'][target]
 
-        #mask = target > threshold
-        #weights = torch.empty_like(target)
-        #weights[~mask] = min_weight
-        #weights[mask] = torch.pow(target[mask], gamma)
-        #weights[target == 0] = min_weight * 0.1
-        #weights /= min_weight * 0.1;
-
-        p1 = 6.72
-        p2 = 2.33
-        weights = torch.exp(p1 * target + p2 * target**2)
-        weights *= np.exp(p1 - p2)
-        weights[target == -1] *= 0.1
-        return weights
-
-        #w = torch.as_tensor(self._weights, device=target.device)
-        #n = len(w)
-        #idx = (target * n).long()
-        #idx[idx == n] = n - 1
-        #return w[idx]
-
-    def training_step(self, batch, batch_idx):
-
-        voxel_id = batch['voxel_id']
-        target = self.meta.transform(batch['vis'])
-        weights = self.get_weights(target)
-
-        x = self.meta.voxel_to_coord(voxel_id, norm=True)
-        pred, __ = self(x)
+        pred, coord = self(x)
         loss = self.weighted_mse_loss(pred, target, weights)
 
         self.log('loss', loss)
-        self._max_vis(batch['vis'].max())
+        return loss
 
-        #torch.save(batch, f'batch_{batch_idx}.pk')
+    def training_step_sumw(self, batch, batch_id):
+        x = self.meta.voxel_to_coord(batch['idx'], norm=True)
+        pred, coord = self(x)
+
+        # ----------------------------------------------------------
+        # calcuate gradient using sobel filter on 3x3 patches
+        # ----------------------------------------------------------
+        # sobel.shape = (3, 27), 3 gradidents and 3x3x3 cube
+        # batch['vis_3x3'].shape = (batch_size, 27, n_pmts)
+        # img_gt.shape = (27, batch_size * n_pmts)
+        # grad_shape = (3, batch_size * n_pmts)
+        # ----------------------------------------------------------
+        sobel = get_sobel_coeffs().type_as(x)
+        img_gt = torch.swapaxes(batch['vis_3x3'], 0, 1).reshape(27,-1)
+        grad_gt = (sobel @ img_gt)
+        max_grad = grad_gt.abs().max(axis=0).values
+        weights = self._lut['grad'][max_grad]
+
+        target = batch['vis'].flatten()
+        weights += self._lut['vis'][target]
+
+        loss = self.weighted_mse_loss(pred.flatten(), target, weights)
+
+        self.log('loss', loss)
 
         return loss
 
-    def training_step_end(self, outputs):
-        self.log('max_vis', self._max_vis.compute())
-        self._max_vis.reset()
+    def training_step(self, batch, batch_id):
+        voxel_id = batch['voxel_id']
+        x = self.meta.voxel_to_coord(voxel_id, norm=True)
+
+        pred, coord = self(x)
+
+        target = batch['vis']
+
+        #weight = self._lut['vis'][target]
+        #loss = self.weighted_mse_loss(pred, target, weight)
+        
+        weight = torch.ones_like(target)
+        #weight[(target > 0.2) & (target <= 0.4)] = 4.16
+        #weight[(target > 0.4) & (target <= 0.6)] = 15.4
+        #weight[target > 0.6] = 263
+
+        #weight[(target > 0.2) & (target <= 0.4)] = 2.87
+        #weight[(target > 0.4) & (target <= 0.6)] = 10.7
+        #weight[(target > 0.6) & (target <= 0.8)] = 185.
+        #weight[target > 0.8] =  10346.
+
+        weight[(target > 0) & (target <= 0.2)] = 1.57
+        weight[(target > 0.2) & (target <= 0.4)] = 1.75
+        weight[(target > 0.4) & (target <= 0.6)] = 6.51
+        weight[(target > 0.6) & (target <= 0.8)] = 113.
+        weight[target > 0.8] = 6316.
+
+        loss = self.weighted_mse_loss(pred, target, weight)
+
+        #n_pmts = target.shape[-1]
+        #i0 = self.meta.voxel_to_idx(voxel_id)[:,0]
+        #i0 = i0.repeat(n_pmts, 1).swapaxes(0,1)
+
+        #i1 = torch.zeros_like(i0)
+        #i1[:,n_pmts//2:] = 1
+
+        #i2 = self._lut.meta.digitize(target, 2)
+
+        #lut_idx = self._lut.meta.idx_to_voxel(
+        #    torch.stack([i0,i1,i2], axis=-1).reshape(-1, 3)
+        #)
+        #lut = torch.tensor(self._lut.vis).type_as(x)
+        #weight = lut[lut_idx].reshape_as(target)
+
+        #loss = self.weighted_mse_loss(pred, target, weight)
+        #loss = self.weighted_mse_loss(pred, target)
+
+        #mid = n_pmts // 2
+        #loss = self.weighted_mse_loss(
+        #    pred[:,:mid], target[:,:mid], weight[:,:mid]
+        #)
+        #loss += self.weighted_mse_loss(
+        #    pred[:,mid:], target[:,mid:], weight[:,mid:]
+        #)
+
+        self.log('loss', loss)
+        #self.log('sum_w', weight.sum())
+
+        #output = dict(batch)
+        #output['weight'] = weight
+        #output['pred'] = pred
+        #torch.save(output, f'debug_{batch_id}.pkl')
+
+        return loss
+
+    def training_step_grad(self, batch, batch_idx):
+        mask = batch['mask']
+
+        #voxel_ids = batch['voxel_ids'][mask]
+        #x = self.meta.voxel_to_coord(voxel_ids.flatten(), norm=True)
+        #pred, coords = self(x)
+
+        #target = batch['vis'][mask]
+        #weights = self._lut['vis'][target]
+        #loss_0 = self.weighted_mse_loss(pred, target, weights)
+
+        voxel_ids = batch['voxel_ids']
+        x = self.meta.voxel_to_coord(voxel_ids.flatten(), norm=True)
+        pred, coords = self(x)
+
+        target = batch['vis'][mask]
+        pred_center = pred.reshape_as(batch['vis'])[mask]
+        #weights = self._lut['vis'][target]
+
+        loss_0 = self.weighted_mse_loss(pred_center, target)
+
+        self.log('loss_0', loss_0)
+
+        # ----------------------------------------------------------
+        # gradient for ground truth
+        # ----------------------------------------------------------
+        # sobel.shape = (3, 27), 3 gradidents and 3x3x3 cube
+        # sbatch['vis'].shape = (batch_size, 27, n_pmts)
+        # img_gt.shape = (27, batch_size * n_pmts)
+        # grad_shape = (3, batch_size * n_pmts)
+        # ----------------------------------------------------------
+        sobel = get_sobel_coeffs().type_as(x)
+
+        img_gt = torch.swapaxes(batch['vis'], 0, 1).reshape(27,-1)
+        grad_gt = (sobel @ img_gt).flatten()
+        #grad_gt = (sobel @ img_gt).reshape(3, len(x), -1)
+        #step_size = torch.as_tensor(self.meta.norm_step_size).type_as(x)
+        #grad_gt /= 32 * step_size[:,None,None]
+
+        # ----------------------------------------------------------
+        # gradient for prediction
+        # ----------------------------------------------------------
+        # pred.shape = (batch_size * 27, n_pmts) 
+        # img_pred.shape = (3, batch_size * n_pmts)
+        # ----------------------------------------------------------
+        img_pred = pred.reshape_as(batch['vis'])
+        img_pred = torch.swapaxes(img_pred, 0, 1).reshape(27,-1)
+        grad_pred = (sobel @ img_pred).flatten()
+
+
+        #weights = self._lut['grad'][grad_gt.abs()]
+        loss_1 = self.weighted_mse_loss(grad_pred, grad_gt)
+
+        #loss_1 = 0
+        #for pmt in range(pred.shape[1]):
+        #    grad_pred = gradient(pred[:,pmt], coords)
+        #    target = grad_gt[:,:,pmt].T
+        #    weights = self._lut['grad'][target.abs()]
+        #    loss_1 += self.weighted_mse_loss(grad_pred, target, weights)
+        #loss_1 /= pred.shape[1]
+
+        self.log('loss_1', loss_1)
+
+        #loss = self._lambda0 * loss_0 + self._lambda1 * loss_1
+        loss = loss_0 + loss_1
+        self.log('loss', loss)
+
+        return loss
+
+    def training_step_part(self, batch, batch_idx):
+
+        voxel_id = batch['voxel_id'].squeeze()
+        x = self.meta.voxel_to_coord(voxel_id, norm=True)
+
+        to_numpy = lambda t : t.squeeze().to('cpu', copy=True).numpy()
+
+        shape = tuple(to_numpy(batch['shape']))
+
+        padding = to_numpy(batch['padding'])
+        padding[:,1] += shape[:-1]
+        sx = slice(*padding[0])
+        sy = slice(*padding[1])
+        sz = slice(*padding[2])
+
+        pred, coord = self(x)
+
+        # --------------------------------
+        target = batch['vis'].squeeze()
+        target = target.reshape(shape)
+        target = target[sx,sy,sz].flatten()
+
+        pred_ = pred.reshape(shape)
+        pred_ = pred_[sx,sy,sz].flatten()
+
+        #weights = self._lut['vis'][target]
+        weights = get_weights(target)
+        loss_0 = self.weighted_mse_loss(pred_, target, weights)
+
+        self.log('loss_0', loss_0)
+
+        # --------------------------------
+        img_pred = pred.reshape(shape)
+        img_pred = torch.moveaxis(img_pred.unsqueeze(0), -1, 0)
+        grad_pred = self._sobel(img_pred).squeeze()
+        grad_pred = grad_pred[:,sx,sy,sz]
+
+        img_gt = batch['vis'].squeeze().reshape(shape)
+        img_gt = torch.moveaxis(img_gt.unsqueeze(0), -1, 0)
+        grad_gt = self._sobel(img_gt).squeeze()
+        grad_gt = grad_gt[:,sx,sy,sz]
+
+        loss_1 = self.weighted_mse_loss(grad_pred, grad_gt)
+
+
+        self.log('loss_1', loss_1)
+
+        # --------------------------------
+        loss = self._lambda0 * loss_0 + self._lambda1 * loss_1
+        self.log('loss', loss)
+
+        return loss
 
     def configure_optimizers(self):
-        opt = torch.optim.Adam(self.parameters(), lr=5e-5)
-        #sch = torch.optim.lr_scheduler.ExponentialLR(opt, 0.95, verbose=True)
-        #sch = torch.optim.lr_scheduler.LambdaLR(opt, self._lr_lambda, verbose=True)
+        #opt = torch.optim.Adam(self.parameters(), lr=5e-5)
+        opt = torch.optim.Adam(self.parameters(), lr=5e-9)
         sch = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            opt, mode='min', factor=0.5, patience=10, threshold=1e-4, 
+            opt, mode='min', factor=0.5, patience=50, threshold=1e-4, 
             threshold_mode='rel', cooldown=10, verbose=True)
-
-        #sch = torch.optim.lr_scheduler.MultiStepLR(
-        #    opt, milestones=[1500, 5000], gamma=0.1)
 
         return {
             'optimizer': opt,
@@ -109,3 +389,4 @@ class Siren(LightningModule):
                 'monitor'   : 'loss',
             },
         }
+
