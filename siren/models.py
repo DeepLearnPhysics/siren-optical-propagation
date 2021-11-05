@@ -133,13 +133,16 @@ class Siren(LightningModule):
         net_pars = model_cfg['network']
         self.net = SirenNet(**net_pars)
 
-        self._lut = {
-            key: WeightLUT.load(model_cfg['lut'], key)
-            for key in ['vis']
-        }
-        #self._lut = PhotonLib.load(model_cfg['lut'], lib=torch)
+        #self._lut = {
+        #    key: WeightLUT.load(model_cfg['lut'], key)
+        #    for key in ['vis']
+        #}
 
-        plib_fpath = cfg[plib]['filepath']
+        if model_cfg.get('lut') is not None:
+            self._lut = PhotonLib.load(model_cfg['lut'], lib=torch)
+
+        self.plib_cfg = cfg[plib]
+        plib_fpath = self.plib_cfg['filepath']
         self.meta = Meta.load(plib_fpath, lib=torch)
 
     def forward(self, x):
@@ -189,65 +192,59 @@ class Siren(LightningModule):
 
     def training_step(self, batch, batch_id):
         voxel_id = batch['voxel_id']
-        x = self.meta.voxel_to_coord(voxel_id, norm=True)
-
-        pred, coord = self(x)
-
         target = batch['vis']
 
-        #weight = self._lut['vis'][target]
-        #loss = self.weighted_mse_loss(pred, target, weight)
+        x = self.meta.voxel_to_coord(voxel_id, norm=True)
+        pred, coord = self(x)
+
+        target_for_lut = target
+        #if not self.plib_cfg.get('transform', False):
+        #    eps = self.plib_cfg.get('eps', 1e-7)
+        #    target_for_lut = PhotonLib.transform(target, eps=eps, lib=torch)
+
+
+        n_pmts = target.shape[-1]
+        i0 = self.meta.voxel_to_idx(voxel_id)[:,0]
+        i0 = i0.repeat(n_pmts, 1).swapaxes(0,1)
+
+        i1 = torch.zeros_like(i0)
+        i1[:,n_pmts//2:] = 1
+
+        i2 = self._lut.meta.digitize(target_for_lut, 2)
+
+        lut_idx = self._lut.meta.idx_to_voxel(
+            torch.stack([i0,i1,i2], axis=-1).reshape(-1, 3)
+        )
+        lut = torch.tensor(self._lut.vis).type_as(x)
+        weight = lut[lut_idx].reshape_as(target)
+
+        #weight = self._lut['vis'][target_for_lut]
         
-        weight = torch.ones_like(target)
-        #weight[(target > 0.2) & (target <= 0.4)] = 4.16
-        #weight[(target > 0.4) & (target <= 0.6)] = 15.4
-        #weight[target > 0.6] = 263
-
-        #weight[(target > 0.2) & (target <= 0.4)] = 2.87
-        #weight[(target > 0.4) & (target <= 0.6)] = 10.7
-        #weight[(target > 0.6) & (target <= 0.8)] = 185.
-        #weight[target > 0.8] =  10346.
-
-        weight[(target > 0) & (target <= 0.2)] = 1.57
-        weight[(target > 0.2) & (target <= 0.4)] = 1.75
-        weight[(target > 0.4) & (target <= 0.6)] = 6.51
-        weight[(target > 0.6) & (target <= 0.8)] = 113.
-        weight[target > 0.8] = 6316.
-
+        #mask = target == 0
+        #loss = 0.422 * self.weighted_mse_loss(pred[mask], target[mask])
+        #loss += 0.578 * self.weighted_mse_loss(
+        #    pred[~mask], target[~mask], weight[~mask]
+        #)
         loss = self.weighted_mse_loss(pred, target, weight)
+        
+        self.log('loss', loss, on_step=False, on_epoch=True)
 
-        #n_pmts = target.shape[-1]
-        #i0 = self.meta.voxel_to_idx(voxel_id)[:,0]
-        #i0 = i0.repeat(n_pmts, 1).swapaxes(0,1)
+        eps = self.plib_cfg.get('eps', 1e-7)
+        mask = target > PhotonLib.transform(4.5e-5, eps)
+        if torch.any(mask):
+            a = PhotonLib.inv_transform(pred[mask], eps, lib=torch)
+            b = PhotonLib.inv_transform(target[mask], eps, lib=torch)
+            bias = 2 * torch.abs(a - b) / (a + b)
+            self.log('bias', bias.mean() * 100, prog_bar=True, on_step=False, on_epoch=True)
 
-        #i1 = torch.zeros_like(i0)
-        #i1[:,n_pmts//2:] = 1
-
-        #i2 = self._lut.meta.digitize(target, 2)
-
-        #lut_idx = self._lut.meta.idx_to_voxel(
-        #    torch.stack([i0,i1,i2], axis=-1).reshape(-1, 3)
-        #)
-        #lut = torch.tensor(self._lut.vis).type_as(x)
-        #weight = lut[lut_idx].reshape_as(target)
-
-        #loss = self.weighted_mse_loss(pred, target, weight)
-        #loss = self.weighted_mse_loss(pred, target)
-
-        #mid = n_pmts // 2
-        #loss = self.weighted_mse_loss(
-        #    pred[:,:mid], target[:,:mid], weight[:,:mid]
-        #)
-        #loss += self.weighted_mse_loss(
-        #    pred[:,mid:], target[:,mid:], weight[:,mid:]
-        #)
-
-        self.log('loss', loss)
-        #self.log('sum_w', weight.sum())
 
         #output = dict(batch)
-        #output['weight'] = weight
-        #output['pred'] = pred
+        #output.update({
+        #    'weight' : weight,
+        #    'pred' : pred,
+        #    'target' : target,
+        #    'lut_idx' : lut_idx
+        #})
         #torch.save(output, f'debug_{batch_id}.pkl')
 
         return loss
@@ -375,12 +372,13 @@ class Siren(LightningModule):
         return loss
 
     def configure_optimizers(self):
-        #opt = torch.optim.Adam(self.parameters(), lr=5e-5)
-        opt = torch.optim.Adam(self.parameters(), lr=5e-9)
+        #opt = torch.optim.Adam(self.parameters(), lr=1e-5)
+        opt = torch.optim.Adam(self.parameters(), lr=1e-7)
         sch = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            opt, mode='min', factor=0.5, patience=50, threshold=1e-4, 
-            threshold_mode='rel', cooldown=10, verbose=True)
+            opt, mode='min', factor=0.5, patience=5, threshold=1e-4, 
+            threshold_mode='rel', cooldown=1, verbose=True)
 
+        return opt
         return {
             'optimizer': opt,
             'lr_scheduler': {
@@ -389,4 +387,3 @@ class Siren(LightningModule):
                 'monitor'   : 'loss',
             },
         }
-
