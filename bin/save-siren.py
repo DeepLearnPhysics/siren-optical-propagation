@@ -1,0 +1,54 @@
+#!/usr/bin/env python3 
+
+import yaml
+import torch
+import h5py
+import fire
+
+from functools import partial
+from tqdm import trange
+
+from siren import Siren
+from photonlib import PhotonLib
+
+
+def save(cfg_file, ckpt_file, outfile='siren.h5', device=0):
+    with open(cfg_file, 'r') as f:
+        cfg = yaml.safe_load(f)
+
+    model = Siren.load_from_checkpoint(ckpt_file, cfg=cfg)
+    model.eval()
+    model.to(device)
+
+    meta = model.meta
+    nx, ny, nz = meta.shape
+    n_pmts = cfg['siren']['network']['out_features']
+
+    plib_cfg = cfg['photonlib']
+    to_vis = partial(
+        PhotonLib.inv_transform, 
+        vmax=plib_cfg.get('vmax', 1),
+        eps=plib_cfg.get('eps', 1e-7),
+        lib=torch
+    )
+
+    vis_pred = torch.empty(
+        nx, ny, nz, n_pmts, dtype=torch.float32, device=device
+    )
+
+    meta 
+
+    for ix in trange(nx):
+        torch.cuda.empty_cache()
+        x = meta.idx_to_coord(meta.idx_at('x', ix, device=device), norm=True) 
+        pred, coord = model(x)
+
+        vis_pred[ix] = to_vis(pred).reshape(ny, nz, n_pmts).detach()
+
+    with h5py.File(outfile, 'w') as f:
+        f.create_dataset(
+            'vis_pred', data=vis_pred.cpu().numpy(), compression='lzf'
+        )
+
+if __name__ == '__main__':
+    fire.Fire(save)
