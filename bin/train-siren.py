@@ -5,6 +5,7 @@ import torch
 import fire
 import os
 import time
+import sys
 
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import CSVLogger
@@ -14,7 +15,13 @@ from pytorch_lightning.plugins import DDPPlugin
 from siren import Siren 
 from siren.io import dataloader_factory, PhotonLibWrapper
 
-def train(cfg_file, lr=None, checkpoint=None, max_epochs=10000):
+def train(cfg_file, lr=None, load=None, resume=None, max_epochs=10000):
+
+    # check input arguments
+    if load is not None and resume is not None:
+        print('[Error] --load and --resume cannot be used together',
+              file=sys.stderr)
+        return
 
     # prepare config dict
     with open(cfg_file, 'r') as f:
@@ -36,11 +43,11 @@ def train(cfg_file, lr=None, checkpoint=None, max_epochs=10000):
 
     logger = CSVLogger(log_dir, name=log_name)
 
-    # checkpoint
-    if checkpoint is None:
+    if load is None:
         model = Siren(cfg)
     else:
-        model = Siren.load_from_checkpoint(checkpoint, cfg=cfg)
+        print(f'[INFO] load {load}')
+        model = Siren.load_from_checkpoint(load, cfg=cfg)
 
     ckpt_callback = ModelCheckpoint(
         save_top_k=3,
@@ -53,12 +60,16 @@ def train(cfg_file, lr=None, checkpoint=None, max_epochs=10000):
     trainer = Trainer(
         gpus=1,
         max_epochs=max_epochs,
-        log_every_n_steps=37,
+        log_every_n_steps=8,
         logger=logger,
         callbacks=[ckpt_callback],
     )
 
-    trainer.fit(model, dataloader)
+    if resume is None:
+        trainer.fit(model, dataloader)
+    else:
+        print(f'[INFO] resume {resume}')
+        trainer.fit(model, dataloader, ckpt_path=resume)
 
 if __name__ == '__main__':
     fire.Fire(train)
