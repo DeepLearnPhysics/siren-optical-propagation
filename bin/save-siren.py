@@ -12,7 +12,7 @@ from siren import Siren
 from photonlib import PhotonLib
 
 
-def save(cfg_file, ckpt_file, outfile='siren.h5', device=0):
+def save(cfg_file, ckpt_file, outfile='siren_pred.h5', device=0):
     with open(cfg_file, 'r') as f:
         cfg = yaml.safe_load(f)
 
@@ -36,8 +36,6 @@ def save(cfg_file, ckpt_file, outfile='siren.h5', device=0):
         nx, ny, nz, n_pmts, dtype=torch.float32, device=device
     )
 
-    meta 
-
     for ix in trange(nx):
         torch.cuda.empty_cache()
         x = meta.idx_to_coord(meta.idx_at('x', ix, device=device), norm=True) 
@@ -45,10 +43,7 @@ def save(cfg_file, ckpt_file, outfile='siren.h5', device=0):
 
         vis_pred[ix] = to_vis(pred).reshape(ny, nz, n_pmts).detach()
 
-    with h5py.File(outfile, 'w') as f:
-        f.create_dataset(
-            'vis_pred', data=vis_pred.cpu().numpy(), compression='lzf'
-        )
+    PhotonLib.save(outfile, vis_pred.to('cpu'), meta)
 
 if __name__ == '__main__':
     fire.Fire(save)
