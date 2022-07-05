@@ -1,7 +1,6 @@
 import torch
 import h5py
 import numpy as np
-import torchmetrics
 from pytorch_lightning.core.lightning import LightningModule
 
 from functools import partial
