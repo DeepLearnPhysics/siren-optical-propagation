@@ -120,6 +120,44 @@ class PhotonLibPmtPair(Dataset):
         }
         return output
 
+class SirenCalibDataset(Dataset):
+    def __init__(self, files):
+        self._files = files
+        
+        evt_cnts = []
+        for fpath in files:
+            with h5py.File(fpath, 'r') as f:
+                evt_cnts.append(len(f['charge/size']))
+        
+        self._file_toc = np.insert(np.cumsum(evt_cnts), 0, [0]).astype(int)
+        
+    def __len__(self):
+        return self._file_toc[-1]
+    
+    def __getitem__(self, i):
+        if i < 0 or i >= len(self):
+            raise IndexError('index', i, 'out of range')
+            
+        file_idx = np.digitize(i, self._file_toc) - 1
+    
+        fpath = self._files[file_idx]
+        evt_idx = i - self._file_toc[file_idx]
+        
+        with h5py.File(fpath, 'r') as f:
+            toc = np.insert(f['charge/size'][:].cumsum(), 0, [0])
+            
+            hits = f['charge/data'][toc[evt_idx]:toc[evt_idx+1]]
+            output = dict(
+                charge_coord=np.column_stack([hits['x'], hits['y'], hits['z']]),
+                charge_value=hits['q'],
+                charge_tpc=hits['tpc'],
+                charge_mask=hits['mask'],
+                light_value=f['light/data'][evt_idx],
+                light_mask=f['light/active_channels'][:],
+            )
+
+        return output
+
 def dataloader_factory(cls, cfg):
     dataset = cls(**cfg['dataset'])
     dataloader = DataLoader(dataset, **cfg['dataloader'])
