@@ -121,11 +121,14 @@ class PhotonLibPmtPair(Dataset):
         return output
 
 class SirenCalibDataset(Dataset):
-    def __init__(self, files):
-        self._files = files
-        
+    def __init__(self, filepath, adc2pe=None, tpc=None, light_idx=None):
+        self._files = filepath 
+        self._tpc = tpc
+        self._light_idx = light_idx
+        self._adc2pe = adc2pe
+
         evt_cnts = []
-        for fpath in files:
+        for fpath in self._files:
             with h5py.File(fpath, 'r') as f:
                 evt_cnts.append(len(f['charge/size']))
         
@@ -147,15 +150,32 @@ class SirenCalibDataset(Dataset):
             toc = np.insert(f['charge/size'][:].cumsum(), 0, [0])
             
             hits = f['charge/data'][toc[evt_idx]:toc[evt_idx+1]]
-            output = dict(
-                charge_coord=np.column_stack([hits['x'], hits['y'], hits['z']]),
-                charge_value=hits['q'],
-                charge_tpc=hits['tpc'],
-                charge_mask=hits['mask'],
-                light_value=f['light/data'][evt_idx],
-                light_mask=f['light/active_channels'][:],
-            )
+            light_value = f['light/data'][evt_idx]
+            light_mask = f['light/active_channels'][:]
+        
+        if self._adc2pe is not None:
+            light_value *= self._adc2pe
 
+        if self._tpc is not None:
+            mask = hits['mask']
+            tpc = hits['tpc']
+            mask &= tpc == self._tpc
+            hits = hits[mask]
+
+        if self._light_idx is not None:
+            s = slice(*self._light_idx)
+            light_value = light_value[s]
+            light_mask = light_mask[s]
+            
+        coords = np.column_stack([hits['x'], hits['y'], hits['z']])
+        output = dict(
+            charge_coord=coords.astype(np.float32),
+            charge_value=hits['q'].astype(np.float32),
+            charge_tpc=hits['tpc'],
+            charge_mask=hits['mask'],
+            light_value=light_value.astype(np.float32),
+            light_mask=light_mask,
+        )
         return output
 
 def dataloader_factory(cls, cfg):
