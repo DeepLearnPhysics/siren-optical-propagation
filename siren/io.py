@@ -133,6 +133,7 @@ class SirenCalibDataset(Dataset):
                 evt_cnts.append(len(f['charge/size']))
         
         self._file_toc = np.insert(np.cumsum(evt_cnts), 0, [0]).astype(int)
+        self._evt_toc = {}
         
     def __len__(self):
         return self._file_toc[-1]
@@ -147,7 +148,10 @@ class SirenCalibDataset(Dataset):
         evt_idx = i - self._file_toc[file_idx]
         
         with h5py.File(fpath, 'r') as f:
-            toc = np.insert(f['charge/size'][:].cumsum(), 0, [0])
+            toc = self._evt_toc.get(file_idx)
+            if toc is None:
+                toc = np.insert(f['charge/size'][:].cumsum(), 0, [0])
+                self._evt_toc[file_idx] = toc
             
             hits = f['charge/data'][toc[evt_idx]:toc[evt_idx+1]]
             light_value = f['light/data'][evt_idx]
