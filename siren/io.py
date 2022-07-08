@@ -121,11 +121,16 @@ class PhotonLibPmtPair(Dataset):
         return output
 
 class SirenCalibDataset(Dataset):
-    def __init__(self, filepath, adc2pe=None, tpc=None, light_idx=None):
+    def __init__(
+        self, filepath, 
+        adc2pe=None, tpc=None, light_idx=None,
+        apply_charge_mask=False,
+    ):
         self._files = filepath 
         self._tpc = tpc
         self._light_idx = light_idx
         self._adc2pe = adc2pe
+        self._apply_charge_mask = apply_charge_mask
 
         evt_cnts = []
         for fpath in self._files:
@@ -143,9 +148,11 @@ class SirenCalibDataset(Dataset):
             raise IndexError('index', i, 'out of range')
             
         file_idx = np.digitize(i, self._file_toc) - 1
-    
+
         fpath = self._files[file_idx]
         evt_idx = i - self._file_toc[file_idx]
+
+        output = {}
         
         with h5py.File(fpath, 'r') as f:
             toc = self._evt_toc.get(file_idx)
@@ -160,9 +167,12 @@ class SirenCalibDataset(Dataset):
             light_value *= self._adc2pe
 
         if self._tpc is not None:
-            mask = hits['mask']
             tpc = hits['tpc']
-            mask &= tpc == self._tpc
+            mask = tpc == self._tpc
+            hits = hits[mask]
+
+        if self._apply_charge_mask:
+            mask = hits['mask']
             hits = hits[mask]
 
         if self._light_idx is not None:
@@ -173,10 +183,15 @@ class SirenCalibDataset(Dataset):
         output = dict(
             charge_coord=coords.astype(np.float32),
             charge_value=hits['q'].astype(np.float32),
-            charge_tpc=hits['tpc'],
-            charge_mask=hits['mask'],
             light_value=light_value.astype(np.float32),
         )
+
+        if not self._apply_charge_mask:
+            output['charge_mask'] = hits['mask']
+
+        if self._tpc is None:
+            output['tpc'] = hits['tpc']
+
         return output
 
 def dataloader_factory(cls, cfg):
