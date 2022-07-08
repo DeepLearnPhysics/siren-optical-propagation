@@ -155,7 +155,6 @@ class SirenCalibDataset(Dataset):
             
             hits = f['charge/data'][toc[evt_idx]:toc[evt_idx+1]]
             light_value = f['light/data'][evt_idx]
-            light_mask = f['light/active_channels'][:]
         
         if self._adc2pe is not None:
             light_value *= self._adc2pe
@@ -169,7 +168,6 @@ class SirenCalibDataset(Dataset):
         if self._light_idx is not None:
             s = slice(*self._light_idx)
             light_value = light_value[s]
-            light_mask = light_mask[s]
             
         coords = np.column_stack([hits['x'], hits['y'], hits['z']])
         output = dict(
@@ -178,7 +176,6 @@ class SirenCalibDataset(Dataset):
             charge_tpc=hits['tpc'],
             charge_mask=hits['mask'],
             light_value=light_value.astype(np.float32),
-            light_mask=light_mask,
         )
         return output
 
