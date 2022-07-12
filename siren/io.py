@@ -124,21 +124,62 @@ class SirenCalibDataset(Dataset):
     def __init__(
         self, filepath, 
         adc2pe=None, tpc=None, light_idx=None,
-        apply_charge_mask=False,
+        apply_charge_mask=False, chunk_size=1,
     ):
         self._files = filepath 
         self._tpc = tpc
         self._light_idx = light_idx
         self._adc2pe = adc2pe
         self._apply_charge_mask = apply_charge_mask
+        self._chunk_size = chunk_size
 
-        evt_cnts = []
+        self._evt_toc = {}
+        self._partition_toc = {}
+        self._build_file_toc()
+
+    @staticmethod
+    def build_toc(cnts):
+        return np.insert(np.cumsum(cnts), 0, [0]).astype(int)
+
+    def _build_file_toc(self):
+        n_evts = []
         for fpath in self._files:
             with h5py.File(fpath, 'r') as f:
-                evt_cnts.append(len(f['charge/size']))
-        
-        self._file_toc = np.insert(np.cumsum(evt_cnts), 0, [0]).astype(int)
-        self._evt_toc = {}
+                n_evts.append(len(f['charge/size']))
+
+        if self._chunk_size == 1:
+            self._file_toc = self.build_toc(n_evts)
+
+        else:
+            n_partitions = np.asarray(n_evts) // self._chunk_size
+            n_partitions[n_partitions==0] = 1
+            self._file_toc = self.build_toc(n_partitions)
+
+    def _decode_idx(self, i):
+        file_idx = np.digitize(i, self._file_toc) - 1
+        idx = i - self._file_toc[file_idx]
+
+        if file_idx not in self._evt_toc:
+            fpath = self._files[file_idx]
+            with h5py.File(fpath, 'r' ) as f:
+                self._evt_toc[file_idx] = self.build_toc( f['charge/size'][:])
+
+        evt_toc = self._evt_toc[file_idx]
+
+        if self._chunk_size == 1:
+            return file_idx, idx, evt_toc[idx:idx+2]
+
+        if file_idx not in self._partition_toc:
+            with h5py.File(fpath, 'r' ) as f:
+                file_size = len(f['charge/size'])
+            n_parts = max(1, file_size//self._chunk_size)
+            partition = np.full(n_parts, file_size//n_parts)
+            partition[:file_size%n_parts] += 1
+            self._partition_toc[file_idx] = self.build_toc(partition)
+
+        part_toc = self._partition_toc[file_idx]
+        return file_idx, idx, evt_toc[part_toc[idx:idx+2]]
+
         
     def __len__(self):
         return self._file_toc[-1]
@@ -147,43 +188,52 @@ class SirenCalibDataset(Dataset):
         if i < 0 or i >= len(self):
             raise IndexError('index', i, 'out of range')
             
-        file_idx = np.digitize(i, self._file_toc) - 1
-
+        file_idx, idx, hit_ranges = self._decode_idx(i)
         fpath = self._files[file_idx]
-        evt_idx = i - self._file_toc[file_idx]
-
-        output = {}
         
         with h5py.File(fpath, 'r') as f:
-            toc = self._evt_toc.get(file_idx)
-            if toc is None:
-                toc = np.insert(f['charge/size'][:].cumsum(), 0, [0])
-                self._evt_toc[file_idx] = toc
-            
-            hits = f['charge/data'][toc[evt_idx]:toc[evt_idx+1]]
-            light_value = f['light/data'][evt_idx]
+            hits = f['charge/data'][slice(*hit_ranges)]
+
+            if self._chunk_size == 1:
+                start, stop = idx, idx+1
+            else:
+                start, stop = self._partition_toc[file_idx][idx:idx+2]
+
+            light_value = f['light/data'][start:stop]
         
-        if self._adc2pe is not None:
-            light_value *= self._adc2pe
+        charge_size = np.diff(self._evt_toc[file_idx][start:stop+1])
+        evt_ids = np.repeat(np.arange(len(charge_size)), charge_size)
 
         if self._tpc is not None:
             tpc = hits['tpc']
             mask = tpc == self._tpc
             hits = hits[mask]
+            evt_ids = evt_ids[mask]
 
         if self._apply_charge_mask:
             mask = hits['mask']
             hits = hits[mask]
+            evt_ids = evt_ids[mask]
+
+        charge_size = np.zeros(stop-start, dtype=int)
+        ids, cnts = np.unique(evt_ids, return_counts=True)
+        charge_size[ids] = cnts
+
+        if self._adc2pe is not None:
+            light_value *= self._adc2pe
 
         if self._light_idx is not None:
             s = slice(*self._light_idx)
-            light_value = light_value[s]
+            light_value = light_value[:,s]
             
         coords = np.column_stack([hits['x'], hits['y'], hits['z']])
         output = dict(
+            file_ids=np.full_like(evt_ids, file_idx),
+            evt_ids=evt_ids+start,
             charge_coord=coords.astype(np.float32),
             charge_value=hits['q'].astype(np.float32),
-            light_value=light_value.astype(np.float32),
+            charge_size=charge_size.squeeze(),
+            light_value=light_value.squeeze().astype(np.float32),
         )
 
         if not self._apply_charge_mask:
