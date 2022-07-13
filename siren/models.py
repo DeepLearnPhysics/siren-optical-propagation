@@ -3,7 +3,6 @@ import h5py
 import numpy as np
 from pytorch_lightning.core.lightning import LightningModule
 
-from functools import partial
 from siren.networks import Siren as SirenNet
 from photonlib import PhotonLib, Meta
 
@@ -54,24 +53,36 @@ def get_sobel_coeffs():
 
     return coeffs
 
+
 class Siren(LightningModule):
     def __init__(self, cfg, name='siren', plib='photonlib'):
         super().__init__()
 
-        model_cfg = cfg[name]
-        self._lr0 = model_cfg.get('lr', 5e-5)
-        self._bias_threshold = model_cfg.get('bias_threshold', 4.5e-5)
+        self.model_cfg = cfg[name]
+        self._lr0 = self.model_cfg.get('lr', 5e-5)
+        self._bias_threshold = self.model_cfg.get('bias_threshold', 4.5e-5)
 
-        net_pars = model_cfg['network']
+        net_pars = self.model_cfg['network']
         self.net = SirenNet(**net_pars)
 
         self.plib_cfg = cfg[plib]
         plib_fpath = self.plib_cfg['filepath']
         self.meta = Meta.load(plib_fpath, lib=torch)
 
+        self.tranform, self.inv_transform = PhotonLib.partial_transform(
+            vmax=self.plib_cfg.get('vmax', 1),
+            eps=self.plib_cfg.get('eps', 1e-7),
+            sin_out=self.plib_cfg.get('sin_out', False)
+        )
+
+        # validate config
+        sin_out = self.plib_cfg.get('sin_out', False)
+        linear_out = net_pars['outermost_linear']
+        assert sin_out is not linear_out, 'mismatch sin_out, outermost_linear'
+
     def forward(self, x):
         return self.net(x)
-    
+
     def weighted_mse_loss(self, input, target, weight=1.):
         loss = (weight * (input - target)**2).mean()
         return loss
@@ -83,22 +94,17 @@ class Siren(LightningModule):
         x = self.meta.voxel_to_coord(voxel_id, norm=True)
         pred, coord = self(x)
 
-        # do inverse transform (if needed)
-        if self.plib_cfg.get('transform'):
-            eps = self.plib_cfg.get('eps', 1e-7)
-            inv = partial(PhotonLib.inv_transform, eps=eps, lib=torch)
-            target_orig = inv(target)
-            pred_orig = inv(pred.detach())
-        else:
-            target_orig = target
-            pred_orig = pred.detach()
-
         # calcuate L2 loss
         # weight = target_orig * 1e6
         # weight[weight==0] = 1
         weight = 1.
         loss = self.weighted_mse_loss(pred, target, weight)
         self.log('loss', loss, on_step=False, on_epoch=True)
+
+
+        # do inverse transform (if needed) for bias metric
+        target_orig = self.inv_transform(target, lib=torch)
+        pred_orig = self.inv_transform(pred.detach(), lib=torch)
 
         mask = target_orig > self._bias_threshold
         if torch.any(mask):

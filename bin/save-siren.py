@@ -24,13 +24,7 @@ def save(cfg_file, ckpt_file, outfile='siren_pred.h5', device=0):
     nx, ny, nz = meta.shape
     n_pmts = cfg['siren']['network']['out_features']
 
-    plib_cfg = cfg['photonlib']
-    to_vis = partial(
-        PhotonLib.inv_transform, 
-        vmax=plib_cfg.get('vmax', 1),
-        eps=plib_cfg.get('eps', 1e-7),
-        lib=torch
-    )
+    to_vis = partial(model.inv_transform, lib=torch)
 
     vis_pred = torch.empty(
         nx, ny, nz, n_pmts, dtype=torch.float32, device=device
