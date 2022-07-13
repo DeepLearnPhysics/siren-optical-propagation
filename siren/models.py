@@ -53,6 +53,9 @@ def get_sobel_coeffs():
 
     return coeffs
 
+def weighted_mse_loss(input, target, weight=1.):
+    loss = (weight * (input - target)**2).mean()
+    return loss
 
 class Siren(LightningModule):
     def __init__(self, cfg, name='siren', plib='photonlib'):
@@ -62,6 +65,7 @@ class Siren(LightningModule):
         self._lr0 = self.model_cfg.get('lr', 5e-5)
         self._bias_threshold = self.model_cfg.get('bias_threshold', 4.5e-5)
         self._weighting_scheme = self.model_cfg.get('weight', None)
+        self._hardsigmoid = self.model_cfg.get('hardsigmoid', False)
 
         net_pars = self.model_cfg['network']
         self.net = SirenNet(**net_pars)
@@ -70,11 +74,14 @@ class Siren(LightningModule):
         plib_fpath = self.plib_cfg['filepath']
         self.meta = Meta.load(plib_fpath, lib=torch)
 
-        self.tranform, self.inv_transform = PhotonLib.partial_transform(
-            vmax=self.plib_cfg.get('vmax', 1),
-            eps=self.plib_cfg.get('eps', 1e-7),
-            sin_out=self.plib_cfg.get('sin_out', False)
-        )
+        if self.plib_cfg.get('transform', False):
+            self.tranform, self.inv_transform = PhotonLib.partial_transform(
+                vmax=self.plib_cfg.get('vmax', 1),
+                eps=self.plib_cfg.get('eps', 1e-7),
+                sin_out=self.plib_cfg.get('sin_out', False)
+            )
+
+        #self.sigmoid = torch.nn.Hardsigmoid()
 
         # validate config
         sin_out = self.plib_cfg.get('sin_out', False)
@@ -82,11 +89,12 @@ class Siren(LightningModule):
         assert sin_out is not linear_out, 'mismatch sin_out, outermost_linear'
 
     def forward(self, x):
-        return self.net(x)
+        out, coords = self.net(x)
 
-    def weighted_mse_loss(self, input, target, weight=1.):
-        loss = (weight * (input - target)**2).mean()
-        return loss
+        if self._hardsigmoid:
+            out = torch.nn.functional.hardsigmoid(out)
+
+        return out, coords
 
     def training_step(self, batch, batch_idx):
         voxel_id = batch['voxel_id']
@@ -112,9 +120,8 @@ class Siren(LightningModule):
         else:
             weight = 1.
 
-        loss = self.weighted_mse_loss(pred, target, weight)
+        loss = weighted_mse_loss(pred, target, weight)
         self.log('loss', loss, on_step=False, on_epoch=True)
-
 
         mask = target_orig > self._bias_threshold
         if torch.any(mask):
