@@ -61,6 +61,7 @@ class Siren(LightningModule):
         self.model_cfg = cfg[name]
         self._lr0 = self.model_cfg.get('lr', 5e-5)
         self._bias_threshold = self.model_cfg.get('bias_threshold', 4.5e-5)
+        self._weighting_scheme = self.model_cfg.get('weight', None)
 
         net_pars = self.model_cfg['network']
         self.net = SirenNet(**net_pars)
@@ -94,17 +95,26 @@ class Siren(LightningModule):
         x = self.meta.voxel_to_coord(voxel_id, norm=True)
         pred, coord = self(x)
 
+        # do inverse transform (if needed) for bias metric
+        if self.plib_cfg.get('transform', False):
+            target_orig = self.inv_transform(target, lib=torch)
+            pred_orig = self.inv_transform(pred.detach(), lib=torch)
+        else:
+            target_orig = target
+            pred_orig = pred.detach()
+
         # calcuate L2 loss
         # weight = target_orig * 1e6
         # weight[weight==0] = 1
-        weight = 1.
+        if self._weighting_scheme == 'vis':
+            weight = target_orig / self.plib_cfg.get('eps', 1e-7)
+            weight[weight==0] = 1
+        else:
+            weight = 1.
+
         loss = self.weighted_mse_loss(pred, target, weight)
         self.log('loss', loss, on_step=False, on_epoch=True)
 
-
-        # do inverse transform (if needed) for bias metric
-        target_orig = self.inv_transform(target, lib=torch)
-        pred_orig = self.inv_transform(pred.detach(), lib=torch)
 
         mask = target_orig > self._bias_threshold
         if torch.any(mask):
