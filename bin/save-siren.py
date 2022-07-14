@@ -16,7 +16,7 @@ def save(cfg_file, ckpt_file, outfile='siren_pred.h5', device=0):
     with open(cfg_file, 'r') as f:
         cfg = yaml.safe_load(f)
 
-    model = Siren.load_from_checkpoint(ckpt_file, cfg=cfg)
+    model = Siren.load_from_checkpoint(ckpt_file, strict=False, cfg=cfg)
     model.eval()
     model.to(device)
 

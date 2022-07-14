@@ -12,10 +12,12 @@ from pytorch_lightning.loggers import CSVLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.plugins import DDPPlugin
 
-from siren import Siren 
-from siren.io import dataloader_factory, PhotonLibWrapper
+#from siren import Siren 
+#from siren.io import dataloader_factory, PhotonLibWrapper
+from siren.io import dataloader_factory
+from siren.utils import import_from
 
-def train(cfg_file, lr=None, load=None, resume=None, max_epochs=10000):
+def train(cfg_file, lr=None, load=None, resume=None, max_epochs=10000, gpus=1):
 
     # check input arguments
     if load is not None and resume is not None:
@@ -30,7 +32,7 @@ def train(cfg_file, lr=None, load=None, resume=None, max_epochs=10000):
         cfg['siren']['lr'] = lr
 
     # dataloader
-    dataloader = dataloader_factory(PhotonLibWrapper, cfg)
+    dataloader = dataloader_factory(cfg)
 
     # logger
     logger_cfg = cfg.get('logger', {})
@@ -43,27 +45,26 @@ def train(cfg_file, lr=None, load=None, resume=None, max_epochs=10000):
 
     logger = CSVLogger(log_dir, name=log_name)
 
+    Model = import_from(cfg['class']['model'])
+
     if load is None:
-        model = Siren(cfg)
+        model = Model(cfg)
     else:
         print(f'[INFO] load {load}')
-        model = Siren.load_from_checkpoint(load, cfg=cfg)
+        model = Model.load_from_checkpoint(load, strict=False, cfg=cfg)
 
-    ckpt_callback = ModelCheckpoint(
-        save_top_k=3,
-        monitor='bias',
-        mode='min',
-        every_n_epochs=1,
-    )
+    train_cfg = cfg.get('training', {})
+    ckpt_callback = ModelCheckpoint(**train_cfg.get('checkpoint', {}))
 
-    # trainer
-    trainer = Trainer(
-        gpus=1,
+    trainer_cfg = train_cfg.get('trainer', {})
+    trainer_cfg.update(dict(
+        gpus=gpus,
         max_epochs=max_epochs,
-        log_every_n_steps=8,
         logger=logger,
         callbacks=[ckpt_callback],
-    )
+    ))
+
+    trainer = Trainer(**trainer_cfg)
 
     if resume is None:
         trainer.fit(model, dataloader)

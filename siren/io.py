@@ -1,11 +1,9 @@
 import h5py
-import sys
-import os
-import importlib
 import numpy as np
 
 from torch.utils.data import Dataset, DataLoader
 from photonlib import PhotonLib, Meta
+from siren.utils import import_from
 
 class PhotonLibWrapper(Dataset):
     def __init__(self, plib_cfg):
@@ -255,22 +253,17 @@ class SirenCalibDataset(Dataset):
 
         return output
 
-def dataloader_factory(cls, cfg):
+def dataloader_factory(cfg, cls=None):
+    if cls is None:
+        cls = import_from(cfg['class']['dataset'])
+
     dataset = cls(**cfg['dataset'])
+
     dl_cfg = cfg['dataloader'].copy()
 
-    collate_fn_cfg = dl_cfg.get('collate_fn')
-    if collate_fn_cfg is not None:
-        if collate_fn_cfg.count('.') == 0:
-            module = sys.modules['__main__']
-            fn_name = collate_fn_cfg
-        else:
-            module_name, fn_name = os.path.splitext(collate_fn_cfg)
-            module = importlib.import_module(module_name)
-            fn_name = fname.lstrip('.')
-
-        collate_fn = getattr(module, fn_name)
-        dl_cfg['collate_fn'] = collate_fn
+    collate_fn_src = dl_cfg.get('collate_fn')
+    if collate_fn_src is not None:
+        dl_cfg['collate_fn'] = import_from(collate_fn_src)
 
     dataloader = DataLoader(dataset, **dl_cfg)
     return dataloader
