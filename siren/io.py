@@ -132,13 +132,21 @@ class SirenCalibDataset(Dataset):
         self._files = filepath 
         self._tpc = tpc
         self._light_idx = light_idx
-        self._adc2pe = adc2pe
         self._apply_charge_mask = apply_charge_mask
         self._chunk_size = chunk_size
 
+        self._load_adc2pe(adc2pe)
         self._evt_toc = {}
         self._partition_toc = {}
         self._build_file_toc()
+
+    def _load_adc2pe(self, adc2pe):
+        if isinstance(adc2pe, str):
+            self._adc2pe = np.load(adc2pe)
+        elif adc2pe is None:
+            self._adc2pe = None
+        else:
+            self._adc2pe = np.array(adc2pe, dtype=np.float32)
 
     @staticmethod
     def build_toc(cnts):
