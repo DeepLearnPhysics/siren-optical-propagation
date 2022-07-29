@@ -88,6 +88,11 @@ class Siren(LightningModule):
         linear_out = net_pars['outermost_linear']
         assert sin_out is not linear_out, 'mismatch sin_out, outermost_linear'
 
+    def to_vis(self, values):
+        if self.plib_cfg.get('transform', False):
+            return self.inv_transform(values, lib=torch)
+        return values
+
     def forward(self, x, clone=True):
         out, coords = self.net(x, clone)
 
@@ -104,12 +109,8 @@ class Siren(LightningModule):
         pred, coord = self(x)
 
         # do inverse transform (if needed) for bias metric
-        if self.plib_cfg.get('transform', False):
-            target_orig = self.inv_transform(target, lib=torch)
-            pred_orig = self.inv_transform(pred.detach(), lib=torch)
-        else:
-            target_orig = target
-            pred_orig = pred.detach()
+        target_orig = self.to_vis(target)
+        pred_orig = self.to_vis(pred.detach())
 
         # calcuate L2 loss
         # weight = target_orig * 1e6
