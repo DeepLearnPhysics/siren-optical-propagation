@@ -2,13 +2,15 @@ import torch
 import numpy as np
 
 from siren.models import Siren, weighted_mse_loss
+from photonlib import PhotonLib
 
 def collate_fn(batch):
+    cat = lambda x : np.squeeze(x) if len(batch) <= 1 else np.concatenate(x)
     output = {}
     keys = batch[0].keys()
     for key in keys:
         output[key] = torch.as_tensor(
-            np.concatenate([data[key] for data in batch])
+            cat([data[key] for data in batch])
         )
     return output
 
@@ -21,6 +23,15 @@ class SirenCalib(Siren):
             calib_cfg.get('coord_offset', [0,0,0]),
             
         )
+
+        err0 = calib_cfg.get('err0')
+        if err0 is None:
+            self.err0 = torch.scalar_tensor(0.)
+        elif isinstance(err0, str):
+            self.err0 = torch.tensor(np.load(err0))
+        else:
+            self.err0 = torch.tensor(err0)
+
         self._init_light_yield(calib_cfg)
 
     def _init_light_yield(self, calib_cfg):
@@ -41,25 +52,24 @@ class SirenCalib(Siren):
             torch.tensor(np.nan_to_num(light_yield), dtype=torch.float32),
             requires_grad=requires_grad,
         )
-        
-    def forward(self, batch):
-        coords = batch['charge_coord'].clone()
-        
+
+    def get_siren_output(self, coords, clone=True):
+        return super().forward(coords, clone)
+
+    def forward(self, batch, clone_coords=True):
         # apply offet to match lut coordinates
-        coords += self.coord_offset.to(coords.device)
+        coords = batch['charge_coord'] 
+        coords = coords + self.coord_offset.to(coords.device)
         
         coords = self.meta.norm_coord(coords)
         coords[coords<-1] = -1
         coords[coords>1] = 1
         
-        vis, coords_out = super().forward(coords)
+        vis, coords_out = self.get_siren_output(coords, clone_coords)
 
-        if self.plib_cfg.get('transform', False):
-            vis = self.inv_transform(vis, lib=torch)
-                
-        #self.log('vmin', vis.min(), prog_bar=True)  
-        #self.log('vmax', vis.max(), prog_bar=True)
-        
+        # inv. transform of SIREN output, if needed
+        vis = self.to_vis(vis)
+                        
         charge_size = batch['charge_size']
         toc = np.concatenate([[0], np.cumsum(charge_size.to('cpu'))])
         
@@ -74,20 +84,45 @@ class SirenCalib(Siren):
             pred.append(sum_q_vis)
             
         pred_pe = torch.stack(pred) * self.light_yield
-        return pred_pe, coords_out, evt_mask
-            
-    def training_step(self, batch, batch_idx):        
 
-        pred, __, evt_mask = self(batch)
-        
-        target = batch['light_value'][evt_mask]
-        light_mask = ~torch.isnan(target)
-        light_mask &= target > 1
+        output = {
+            'pred' : pred_pe,
+            'coords' : coords_out,
+            'evt_mask' : evt_mask,
+            'vis' : vis
+        }
+        return output
+            
+
+    def chi2_loss(self, obs, pred, reduce=torch.mean):
+        err0 = self.err0.to(pred.device)
+        if err0.dim() == 1:
+            err0 = err0[None,:]
+
+        weight = 1 / (pred + err0**2)
+
+        obs = obs.squeeze()
+        pred = pred.squeeze()
+        weight = weight.squeeze()
+
+        mask = ~torch.isnan(obs)
 
         loss = weighted_mse_loss(
-            pred[light_mask], target[light_mask], 1/pred[light_mask]
+            pred[mask], obs[mask], weight[mask],
+            reduce=reduce,
         )
-        #self.log('loss', loss, on_step=False, on_epoch=True)
+        return loss
+
+
+    def training_step(self, batch, batch_idx):        
+
+        output = self(batch)
+
+        evt_mask = output['evt_mask']
+        obs = batch['light_value'][evt_mask]
+        pred = output['pred']
+
+        loss = self.chi2_loss(obs, pred)
         self.log('loss', loss)
-        
+
         return loss
