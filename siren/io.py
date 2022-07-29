@@ -164,21 +164,17 @@ class SirenCalibDataset(Dataset):
             n_partitions[n_partitions==0] = 1
             self._file_toc = self.build_toc(n_partitions)
 
-    def _decode_idx(self, i):
-        file_idx = np.digitize(i, self._file_toc) - 1
-        idx = i - self._file_toc[file_idx]
-
+    def get_evt_toc(self, file_idx):
         if file_idx not in self._evt_toc:
             fpath = self._files[file_idx]
             with h5py.File(fpath, 'r' ) as f:
                 self._evt_toc[file_idx] = self.build_toc( f['charge/size'][:])
 
-        evt_toc = self._evt_toc[file_idx]
+        return self._evt_toc[file_idx]
 
-        if self._chunk_size == 1:
-            return file_idx, idx, evt_toc[idx:idx+2]
-
+    def get_partition_toc(self, file_idx):
         if file_idx not in self._partition_toc:
+            fpath = self._files[file_idx]
             with h5py.File(fpath, 'r' ) as f:
                 file_size = len(f['charge/size'])
             n_parts = max(1, file_size//self._chunk_size)
@@ -186,10 +182,21 @@ class SirenCalibDataset(Dataset):
             partition[:file_size%n_parts] += 1
             self._partition_toc[file_idx] = self.build_toc(partition)
 
-        part_toc = self._partition_toc[file_idx]
+        return self._partition_toc[file_idx]
+
+
+    def _decode_idx(self, i):
+        file_idx = np.digitize(i, self._file_toc) - 1
+        idx = i - self._file_toc[file_idx]
+
+        evt_toc = self.get_evt_toc(file_idx)
+
+        if self._chunk_size == 1:
+            return file_idx, idx, evt_toc[idx:idx+2]
+
+        part_toc = self.get_partition_toc(file_idx)
         return file_idx, idx, evt_toc[part_toc[idx:idx+2]]
 
-        
     def __len__(self):
         return self._file_toc[-1]
     
@@ -252,6 +259,27 @@ class SirenCalibDataset(Dataset):
             output['tpc'] = hits['tpc']
 
         return output
+
+    @staticmethod
+    def unwrap(chunk):
+        charge_size = chunk['charge_size']
+        toc = SirenCalibDataset.build_toc(charge_size)
+        for i in range(len(charge_size)):
+            if charge_size[i] == 0:
+                continue
+                
+            start, stop = toc[i:i+2]
+            data = {
+                'file_id':      chunk['file_ids'][start],
+                'evt_id':       chunk['evt_ids'][start],
+                'light_value':  chunk['light_value'][i],
+            }
+            
+            for key in ['tpc', 'charge_mask', 'charge_coord', 'charge_value']:
+                if key in chunk:
+                    data[key] = chunk[key][start:stop]
+                    
+            yield data
 
 def dataloader_factory(cfg, cls=None):
     if cls is None:
