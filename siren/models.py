@@ -53,9 +53,9 @@ def get_sobel_coeffs():
 
     return coeffs
 
-def weighted_mse_loss(input, target, weight=1.):
-    loss = (weight * (input - target)**2).mean()
-    return loss
+def weighted_mse_loss(input, target, weight=1., reduce=torch.mean):
+    loss = weight * (input - target)**2
+    return reduce(loss)
 
 class Siren(LightningModule):
     def __init__(self, cfg, name='siren', plib='photonlib'):
@@ -88,8 +88,8 @@ class Siren(LightningModule):
         linear_out = net_pars['outermost_linear']
         assert sin_out is not linear_out, 'mismatch sin_out, outermost_linear'
 
-    def forward(self, x):
-        out, coords = self.net(x)
+    def forward(self, x, clone=True):
+        out, coords = self.net(x, clone)
 
         if self._hardsigmoid:
             out = torch.nn.functional.hardsigmoid(out)

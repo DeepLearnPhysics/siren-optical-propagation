@@ -68,8 +68,10 @@ class Siren(nn.Module):
         
         self.net = nn.Sequential(*self.net)
     
-    def forward(self, coords):
-        coords = coords.clone().detach().requires_grad_(True) # allows to take derivative w.r.t. input
+    def forward(self, coords, clone=True):
+        # allows to take derivative w.r.t. input
+        if clone:
+            coords = coords.clone().detach().requires_grad_(True) 
         output = self.net(coords)
         return output, coords        
 
