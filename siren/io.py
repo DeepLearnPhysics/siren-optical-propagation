@@ -164,6 +164,8 @@ class SirenCalibDataset(Dataset):
             n_partitions[n_partitions==0] = 1
             self._file_toc = self.build_toc(n_partitions)
 
+        self.n_events = np.sum(n_evts)
+
     def get_evt_toc(self, file_idx):
         if file_idx not in self._evt_toc:
             fpath = self._files[file_idx]
@@ -216,23 +218,24 @@ class SirenCalibDataset(Dataset):
                 start, stop = self._partition_toc[file_idx][idx:idx+2]
 
             light_value = f['light/data'][start:stop]
+            src_event_idx= f['charge/event_id'][start:stop]
         
         charge_size = np.diff(self._evt_toc[file_idx][start:stop+1])
-        evt_ids = np.repeat(np.arange(len(charge_size)), charge_size)
+        chunk_idx = np.repeat(np.arange(len(charge_size)), charge_size)
 
         if self._tpc is not None:
             tpc = hits['tpc']
             mask = tpc == self._tpc
             hits = hits[mask]
-            evt_ids = evt_ids[mask]
+            chunk_idx = chunk_idx[mask]
 
         if self._apply_charge_mask:
             mask = hits['mask']
             hits = hits[mask]
-            evt_ids = evt_ids[mask]
+            chunk_idx = chunk_idx[mask]
 
         charge_size = np.zeros(stop-start, dtype=int)
-        ids, cnts = np.unique(evt_ids, return_counts=True)
+        ids, cnts = np.unique(chunk_idx, return_counts=True)
         charge_size[ids] = cnts
 
         if self._adc2pe is not None:
@@ -244,8 +247,9 @@ class SirenCalibDataset(Dataset):
             
         coords = np.column_stack([hits['x'], hits['y'], hits['z']])
         output = dict(
-            file_ids=np.full_like(evt_ids, file_idx),
-            evt_ids=evt_ids+start,
+            file_idx=np.full_like(charge_size, file_idx).squeeze(),
+            event_idx=np.arange(start, stop, dtype=int).squeeze(),
+            src_event_idx=src_event_idx.squeeze(),
             charge_coord=coords.astype(np.float32),
             charge_value=hits['q'].astype(np.float32),
             charge_size=charge_size.squeeze(),
@@ -270,9 +274,10 @@ class SirenCalibDataset(Dataset):
                 
             start, stop = toc[i:i+2]
             data = {
-                'file_id':      chunk['file_ids'][start],
-                'evt_id':       chunk['evt_ids'][start],
-                'light_value':  chunk['light_value'][i],
+                'file_idx':      chunk['file_idx'][i],
+                'event_idx':     chunk['event_idx'][i],
+                'src_event_idx': chunk['src_event_idx'][i],
+                'light_value':   chunk['light_value'][i],
             }
             
             for key in ['tpc', 'charge_mask', 'charge_coord', 'charge_value']:
