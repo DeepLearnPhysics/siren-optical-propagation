@@ -1,6 +1,7 @@
 import h5py
 import numpy as np
 
+from glob import glob
 from torch.utils.data import Dataset, DataLoader
 from photonlib import PhotonLib, Meta
 from siren.utils import import_from
@@ -127,7 +128,8 @@ class SirenCalibDataset(Dataset):
         adc2pe=None, tpc=None, light_idx=None,
         apply_charge_mask=False, chunk_size=1,
     ):
-        self._files = filepath 
+
+        self._set_file_list(filepath)
         self._tpc = tpc
         self._light_idx = light_idx
         self._apply_charge_mask = apply_charge_mask
@@ -149,6 +151,17 @@ class SirenCalibDataset(Dataset):
     @staticmethod
     def build_toc(cnts):
         return np.insert(np.cumsum(cnts), 0, [0]).astype(int)
+
+    def _set_file_list(self, filepath):
+        if isinstance(filepath, str):
+            filepath = [filepath]
+
+        self._files = []
+        for fpath in filepath:
+            if fpath.find('?') != -1 or fpath.find('*') != -1:
+                self._files += glob(fpath)
+            else:
+                self._files.append(fpath)
 
     def _build_file_toc(self):
         n_evts = []
