@@ -61,6 +61,7 @@ class SirenCalib(Siren):
         coords = batch['charge_coord'] 
         coords = coords + self.coord_offset.to(coords.device)
         
+        # TODO(2022-11-08 kvt) Replace with clamp function
         coords = self.meta.norm_coord(coords)
         coords[coords<-1] = -1
         coords[coords>1] = 1
@@ -73,7 +74,7 @@ class SirenCalib(Siren):
         charge_size = batch['charge_size']
         toc = np.concatenate([[0], np.cumsum(charge_size.to('cpu'))])
         
-        evt_mask = charge_size > 10
+        evt_mask = charge_size > 0
         sel = torch.where(evt_mask)[0]
         
         pred = []
