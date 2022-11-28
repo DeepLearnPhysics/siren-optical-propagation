@@ -17,7 +17,10 @@ from pytorch_lightning.plugins import DDPPlugin
 from siren.io import dataloader_factory
 from siren.utils import import_from
 
-def train(cfg_file, lr=None, load=None, resume=None, max_epochs=10000, gpus=1):
+def train( 
+    cfg_file, lr=None, load=None, resume=None, 
+    max_epochs=10000, gpus=1, uuid=False, log=None,
+):
 
     # check input arguments
     if load is not None and resume is not None:
@@ -31,17 +34,30 @@ def train(cfg_file, lr=None, load=None, resume=None, max_epochs=10000, gpus=1):
     if lr is not None:
         cfg['siren']['lr'] = lr
 
+    # -------------------------------------------------------------------------
     # dataloader
+    # -------------------------------------------------------------------------
     dataloader = dataloader_factory(cfg)
 
+    # -------------------------------------------------------------------------
     # logger
+    # -------------------------------------------------------------------------
     logger_cfg = cfg.get('logger', {})
-    log_dir = logger_cfg.get('log_dir', 'logs')
-    log_name = logger_cfg.get('name', None)
+
+    if log is None:
+        log_dir = logger_cfg.get('log_dir', 'logs')
+        log_name = logger_cfg.get('name', None)
+    else:
+        log_dir, log_name = os.path.split(log)
+
     if log_name is None:
+        log_name = 'siren'
+        uuid = True
+
+    if uuid:
         pid = os.getpid()
         ts = int(time.time())
-        log_name = f'siren_{ts:x}_{pid}'
+        log_name = f'{log_name}_{ts:x}_{pid}'
 
     logger = CSVLogger(log_dir, name=log_name)
 
