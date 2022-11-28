@@ -1,6 +1,7 @@
 import h5py
 import numpy as np
 
+from tqdm import tqdm
 from glob import glob
 from torch.utils.data import Dataset, DataLoader
 from photonlib import PhotonLib, Meta
@@ -127,6 +128,7 @@ class SirenCalibDataset(Dataset):
         self, filepath, 
         adc2pe=None, tpc=None, light_idx=None,
         apply_charge_mask=False, chunk_size=1,
+        max_chunks=-1,
     ):
 
         self._set_file_list(filepath)
@@ -134,6 +136,7 @@ class SirenCalibDataset(Dataset):
         self._light_idx = light_idx
         self._apply_charge_mask = apply_charge_mask
         self._chunk_size = chunk_size
+        self._max_chunks = max_chunks
 
         self._load_adc2pe(adc2pe)
         self._evt_toc = {}
@@ -213,7 +216,12 @@ class SirenCalibDataset(Dataset):
         return file_idx, idx, evt_toc[part_toc[idx:idx+2]]
 
     def __len__(self):
-        return self._file_toc[-1]
+        n = self._file_toc[-1]
+
+        if self._max_chunks > 0:
+            return min(self._max_chunks, n)
+
+        return n
     
     def __getitem__(self, i):
         if i < 0 or i >= len(self):
@@ -313,3 +321,31 @@ def dataloader_factory(cfg, cls=None):
 
     dataloader = DataLoader(dataset, **dl_cfg)
     return dataloader
+
+def fill_dataset(f, key, obj):    
+    ds = f.get(key)
+    if ds is None:
+        shape = list(np.shape(obj))
+        shape[0] = None
+        ds = f.create_dataset(key, data=obj, maxshape=shape, compression='gzip')
+    else:
+        n = len(obj)
+        shape = list(ds.shape)
+        shape[0] += n
+        ds.resize(shape)
+        ds[-n:] = obj
+
+
+def save_selection(in_fpath, out_fpath, sel, progress, mode='x'):
+    sel = np.unique(sel)
+    with h5py.File(in_fpath, 'r') as fin, h5py.File(out_fpath, mode) as fout:
+        fill_dataset(fout, 'light/data', fin['light/data'][sel])
+        fill_dataset(fout, 'charge/size', fin['charge/size'][sel])
+        fill_dataset(fout, 'charge/event_id', fin['charge/event_id'][sel])
+            
+        toc = np.insert(np.cumsum(fin['charge/size']), 0, [0])
+
+        charge_data = fin['charge/data']
+        for i in tqdm(sel, desc='saving', disable=not progress):
+            start, stop = toc[i:i+2]
+            fill_dataset(fout, 'charge/data', charge_data[start:stop])  
