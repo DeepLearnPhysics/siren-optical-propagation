@@ -19,7 +19,7 @@ from siren.utils import import_from
 
 def train( 
     cfg_file, lr=None, load=None, resume=None, 
-    max_epochs=10000, gpus=1, uuid=False, log=None,
+    max_epochs=10000, gpus=1, uid=False, log=None,
 ):
 
     # check input arguments
@@ -34,15 +34,17 @@ def train(
     if lr is not None:
         cfg['siren']['lr'] = lr
 
-    # -------------------------------------------------------------------------
     # dataloader
-    # -------------------------------------------------------------------------
     dataloader = dataloader_factory(cfg)
+
+    # uid
+    pid = os.getpid()
+    ts = int(time.time())
 
     # -------------------------------------------------------------------------
     # logger
     # -------------------------------------------------------------------------
-    logger_cfg = cfg.get('logger', {})
+    logger_cfg = cfg.setdefault('logger', {})
 
     if log is None:
         log_dir = logger_cfg.get('log_dir', 'logs')
@@ -52,36 +54,59 @@ def train(
 
     if log_name is None:
         log_name = 'siren'
-        uuid = True
+        uid = True
 
-    if uuid:
-        pid = os.getpid()
-        ts = int(time.time())
+    if uid:
         log_name = f'{log_name}_{ts:x}_{pid}'
 
     logger = CSVLogger(log_dir, name=log_name)
-
+    logger_cfg['log_dir'] = log_dir
+    logger_cfg['name'] = log_name
+    
+    # -------------------------------------------------------------------------
+    # model
+    # -------------------------------------------------------------------------
     Model = import_from(cfg['class']['model'])
+    train_cfg = cfg.setdefault('training', {})
+    train_cfg['runtime'] = {'max_epochs': max_epochs}
+    runtime_cfg = train_cfg['runtime']
 
     if load is None:
         model = Model(cfg)
     else:
         print(f'[INFO] load {load}')
         model = Model.load_from_checkpoint(load, strict=False, cfg=cfg)
+        runtime_cfg['load'] = load
 
-    train_cfg = cfg.get('training', {})
+    # -------------------------------------------------------------------------
+    # Trainer + Checkpoint
+    # -------------------------------------------------------------------------
     ckpt_callback = ModelCheckpoint(**train_cfg.get('checkpoint', {}))
 
-    trainer_cfg = train_cfg.get('trainer', {})
-    trainer_cfg.update(dict(
+    trainer_kwargs = train_cfg.get('trainer', {}).copy()
+    trainer_kwargs.update(dict(
         gpus=gpus,
         max_epochs=max_epochs,
         logger=logger,
         callbacks=[ckpt_callback],
     ))
 
-    trainer = Trainer(**trainer_cfg)
+    trainer = Trainer(**trainer_kwargs)
+    if resume is not None:
+        runtime_cfg['resume'] = resume
 
+    # -------------------------------------------------------------------------
+    # save cfg file
+    # -------------------------------------------------------------------------
+    cfg_dir = os.path.join(log_dir, log_name, 'cfg')
+    os.makedirs(cfg_dir)
+    with open(f'{cfg_dir}/siren_{ts:x}_{pid}.yaml', 'w') as f:
+        yaml.safe_dump(cfg, f)
+
+
+    # -------------------------------------------------------------------------
+    # start training
+    # -------------------------------------------------------------------------
     if resume is None:
         trainer.fit(model, dataloader)
     else:
