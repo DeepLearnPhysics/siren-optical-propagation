@@ -90,7 +90,8 @@ class SirenCalib(Siren):
             'pred' : pred_pe,
             'coords' : coords_out,
             'evt_mask' : evt_mask,
-            'vis' : vis
+            'vis' : vis,
+            'batch_size' : len(pred),
         }
         return output
             
@@ -124,6 +125,6 @@ class SirenCalib(Siren):
         pred = output['pred']
 
         loss = self.chi2_loss(obs, pred)
-        self.log('loss', loss)
+        self.log('loss', loss, batch_size=output['batch_size'])
 
         return loss
