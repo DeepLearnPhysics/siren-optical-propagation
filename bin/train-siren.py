@@ -36,6 +36,11 @@ def train(
 
     # dataloader
     dataloader = dataloader_factory(cfg)
+    val_dataloader = None
+    if 'val_dataloader' in cfg:
+        val_dataloader = dataloader_factory(
+            cfg, data_key='val_dataset', loader_key='val_dataloader'
+        )
 
     # uid
     pid = os.getpid()
@@ -108,10 +113,10 @@ def train(
     # start training
     # -------------------------------------------------------------------------
     if resume is None:
-        trainer.fit(model, dataloader)
+        trainer.fit(model, dataloader, val_dataloader)
     else:
         print(f'[INFO] resume {resume}')
-        trainer.fit(model, dataloader, ckpt_path=resume)
+        trainer.fit(model, dataloader, val_dataloader, ckpt_path=resume)
 
 if __name__ == '__main__':
     fire.Fire(train)

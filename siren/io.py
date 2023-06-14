@@ -307,13 +307,15 @@ class SirenCalibDataset(Dataset):
                     
             yield data
 
-def dataloader_factory(cfg, cls=None):
+def dataloader_factory(
+    cfg, cls=None, data_key='dataset', loader_key='dataloader'
+):
     if cls is None:
-        cls = import_from(cfg['class']['dataset'])
+        cls = import_from(cfg['class'][data_key])
 
-    dataset = cls(**cfg['dataset'])
+    dataset = cls(**cfg[data_key])
 
-    dl_cfg = cfg['dataloader'].copy()
+    dl_cfg = cfg[loader_key].copy()
 
     collate_fn_src = dl_cfg.get('collate_fn')
     if collate_fn_src is not None:

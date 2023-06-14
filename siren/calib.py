@@ -128,3 +128,15 @@ class SirenCalib(Siren):
         self.log('loss', loss, batch_size=output['batch_size'])
 
         return loss
+
+    def validation_step(self, batch, batch_idx):        
+
+        output = self(batch)
+
+        evt_mask = output['evt_mask']
+        obs = batch['light_value'][evt_mask]
+        pred = output['pred']
+
+        loss = self.chi2_loss(obs, pred)
+        self.log('val_loss', loss, batch_size=output['batch_size'])
+        return loss
