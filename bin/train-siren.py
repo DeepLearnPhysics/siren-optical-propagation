@@ -7,19 +7,16 @@ import os
 import time
 import sys
 
-from pytorch_lightning import Trainer
-from pytorch_lightning.loggers import CSVLogger
-from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning.plugins import DDPPlugin
+from lightning.pytorch import Trainer
+from lightning.pytorch.loggers import CSVLogger
+from lightning.pytorch.callbacks import ModelCheckpoint
 
-#from siren import Siren 
-#from siren.io import dataloader_factory, PhotonLibWrapper
 from siren.io import dataloader_factory
 from siren.utils import import_from
 
 def train( 
     cfg_file, lr=None, load=None, resume=None, 
-    max_epochs=10000, gpus=1, uid=False, log=None,
+    max_epochs=10000, uid=False, log=None,
 ):
 
     # check input arguments
@@ -52,7 +49,7 @@ def train(
     logger_cfg = cfg.setdefault('logger', {})
 
     if log is None:
-        log_dir = logger_cfg.get('log_dir', 'logs')
+        log_dir = logger_cfg.get('save_dir', 'logs')
         log_name = logger_cfg.get('name', None)
     else:
         log_dir, log_name = os.path.split(log)
@@ -64,9 +61,9 @@ def train(
     if uid:
         log_name = f'{log_name}_{ts:x}_{pid}'
 
-    logger = CSVLogger(log_dir, name=log_name)
-    logger_cfg['log_dir'] = log_dir
+    logger_cfg['save_dir'] = log_dir
     logger_cfg['name'] = log_name
+    logger = CSVLogger(**logger_cfg)
     
     # -------------------------------------------------------------------------
     # model
@@ -90,11 +87,12 @@ def train(
 
     trainer_kwargs = train_cfg.get('trainer', {}).copy()
     trainer_kwargs.update(dict(
-        gpus=gpus,
         max_epochs=max_epochs,
         logger=logger,
         callbacks=[ckpt_callback],
     ))
+    trainer_kwargs.setdefault('devices', 1)
+    trainer_kwargs.setdefault('accelerator', 'auto')
 
     trainer = Trainer(**trainer_kwargs)
     if resume is not None:
@@ -104,7 +102,8 @@ def train(
     # save cfg file
     # -------------------------------------------------------------------------
     cfg_dir = os.path.join(log_dir, log_name, 'cfg')
-    os.makedirs(cfg_dir)
+    if not os.path.isdir(cfg_dir):
+        os.makedirs(cfg_dir)
     with open(f'{cfg_dir}/siren_{ts:x}_{pid}.yaml', 'w') as f:
         yaml.safe_dump(cfg, f)
 
@@ -119,4 +118,5 @@ def train(
         trainer.fit(model, dataloader, val_dataloader, ckpt_path=resume)
 
 if __name__ == '__main__':
+    torch.set_float32_matmul_precision('medium')
     fire.Fire(train)
