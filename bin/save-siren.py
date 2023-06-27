@@ -25,7 +25,7 @@ def save(cfg_file, ckpt_file, outfile='siren_pred.h5', device=0):
     nx, ny, nz = meta.shape
     n_pmts = cfg['siren']['network']['out_features']
 
-    to_vis = partial(model.inv_transform, lib=torch)
+    to_vis = partial(model.siren.inv_transform, lib=torch)
 
     vis_pred = torch.empty(
         nx, ny, nz, n_pmts, dtype=torch.float32, device=device
@@ -35,18 +35,11 @@ def save(cfg_file, ckpt_file, outfile='siren_pred.h5', device=0):
         torch.cuda.empty_cache()
         x = meta.idx_to_coord(meta.idx_at('x', ix, device=device), norm=True) 
 
-        if hasattr(model, 'get_siren_output'):
-            pred, coord = model.get_siren_output(x)
-        else:
-            pred, coord = model(x)
-
+        pred, coord = model(x)
         vis_pred[ix] = to_vis(pred).reshape(ny, nz, n_pmts).detach()
 
-    light_yield = getattr(model, 'light_yield', None)
-    if light_yield is not None:
-        light_yield = light_yield.detach().cpu().numpy()
-
-    PhotonLib.save(outfile, vis_pred.to('cpu'), meta, eff=light_yield)
+    scale = model.siren.scale.detach().cpu().numpy()
+    PhotonLib.save(outfile, vis_pred.to('cpu'), meta, eff=scale)
 
 if __name__ == '__main__':
     fire.Fire(save)
