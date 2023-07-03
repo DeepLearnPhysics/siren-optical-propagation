@@ -23,12 +23,6 @@ class SirenVisModel(LightningModule):
         self._lr0 = model_cfg.get('lr', 5e-5)
 
         self.weight_cfg = model_cfg.get('weight')
-        if self.weight_cfg.get('method') == 'vis':
-            self.register_buffer(
-                'weight_factor', 
-                torch.tensor(self.weight_cfg.get('factor', 1.))
-            )
-
         self.bias_threshold = model_cfg.get('bias_threshold', 4.5e-5)
 
     def get_bias(self, tgt, pred):
@@ -56,7 +50,8 @@ class SirenVisModel(LightningModule):
         
         # event weighting
         if self.weight_cfg.get('method') == 'vis':
-            weights = tgt_linear * self.weight_factor
+            weights = tgt_linear * self.weight_cfg.get('factor', 1.)
+            weights[weights==0] = 1
         else:
             weights = 1.
             
