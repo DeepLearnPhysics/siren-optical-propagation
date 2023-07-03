@@ -30,11 +30,7 @@ class SirenVisModel(LightningModule):
             )
 
         self.bias_threshold = model_cfg.get('bias_threshold', 4.5e-5)
-    
-    def get_weight_by_vis(self, vis):
-        weights = vis * self.weight_factor
-        return vis
-    
+
     def get_bias(self, tgt, pred):
         mask = tgt > self.bias_threshold
         a = pred[mask]
@@ -60,7 +56,7 @@ class SirenVisModel(LightningModule):
         
         # event weighting
         if self.weight_cfg.get('method') == 'vis':
-            weights = self.get_weight_by_vis(tgt)
+            weights = tgt_linear * self.weight_factor
         else:
             weights = 1.
             
