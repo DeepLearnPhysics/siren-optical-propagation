@@ -28,8 +28,10 @@ def train(
     # prepare config dict
     with open(cfg_file, 'r') as f:
         cfg = yaml.safe_load(f)
+
+    # set learning rate, if given
     if lr is not None:
-        cfg['siren']['lr'] = lr
+        cfg['model']['lr'] = lr
 
     # dataloader
     dataloader = dataloader_factory(cfg)
