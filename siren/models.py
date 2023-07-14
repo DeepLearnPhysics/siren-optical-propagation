@@ -5,6 +5,7 @@ from lightning import LightningModule
 
 from siren.nets import SirenVis
 from photonlib import Meta
+import time
 
 def weighted_mse_loss(input, target, weight=1., reduce=torch.mean):
     loss = weight * (input - target)**2
@@ -25,6 +26,10 @@ class SirenVisModel(LightningModule):
         self.weight_cfg = model_cfg.get('weight')
         self.bias_threshold = model_cfg.get('bias_threshold', 4.5e-5)
 
+        self.train_start,self.train_end=None,None
+        self.time_train=0.
+        self.time_wait=0.
+
     def get_bias(self, tgt, pred):
         mask = tgt > self.bias_threshold
         a = pred[mask]
@@ -36,6 +41,10 @@ class SirenVisModel(LightningModule):
         return self.siren(x)
     
     def training_step(self, batch, batch_idx):
+        self.train_start = time.time()
+        if self.train_end is not None:
+            self.time_wait += self.train_start - self.train_end
+
         voxel_id = batch['voxel_id']
         tgt = batch['vis']
         
@@ -62,7 +71,12 @@ class SirenVisModel(LightningModule):
         # calculate bias
         bias = self.get_bias(tgt_linear, pred_linear) * 100. #in percent
         self.log('bias', bias, prog_bar=True, on_step=False, on_epoch=True)
-        
+
+        self.train_end = time.time()
+        self.time_train += self.train_end - self.train_start
+
+        self.log('ttrain', self.time_train, on_step=False, on_epoch=True)
+        self.log('twait', self.time_wait, on_step=False, on_epoch=True)
         return loss
     
     def configure_optimizers(self):
